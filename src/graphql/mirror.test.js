@@ -183,6 +183,99 @@ describe("graphql/mirror", () => {
         ).toEqual(3);
       });
     });
+
+    describe("registerObject", () => {
+      it("adds an object and its connections to the database", () => {
+        const db = new Database(":memory:");
+        const schema = buildGithubSchema();
+        const mirror = new Mirror(db, schema);
+        mirror.registerObject({
+          typename: "Issue",
+          id: "issue:sourcecred/example-github#1",
+        });
+        expect(
+          db
+            .prepare("SELECT * FROM objects WHERE typename = ? AND id = ?")
+            .all("Issue", "issue:sourcecred/example-github#1")
+        ).toHaveLength(1);
+        expect(
+          db
+            .prepare(
+              "SELECT fieldname FROM connections WHERE object_id = ? " +
+                "ORDER BY fieldname ASC"
+            )
+            .all("issue:sourcecred/example-github#1")
+        ).toEqual([{fieldname: "comments"}]);
+      });
+      it("doesn't touch an existing object with the same typename", () => {
+        const db = new Database(":memory:");
+        const schema = buildGithubSchema();
+        const mirror = new Mirror(db, schema);
+        const objectId = "issue:sourcecred/example-github#1";
+        mirror.registerObject({
+          typename: "Issue",
+          id: objectId,
+        });
+
+        const updateId = mirror._createUpdate(new Date(123));
+        db.prepare(
+          "UPDATE objects SET last_update = :updateId WHERE id = :objectId"
+        ).run({updateId, objectId});
+
+        mirror.registerObject({
+          typename: "Issue",
+          id: objectId,
+        });
+        expect(
+          db.prepare("SELECT * FROM objects WHERE id = ?").get(objectId)
+        ).toEqual({
+          typename: "Issue",
+          id: objectId,
+          last_update: updateId,
+        });
+      });
+      it("rejects if an existing object's typename were to change", () => {
+        const db = new Database(":memory:");
+        const schema = buildGithubSchema();
+        const mirror = new Mirror(db, schema);
+        mirror.registerObject({typename: "Issue", id: "my-favorite-id"});
+        expect(() => {
+          mirror.registerObject({typename: "User", id: "my-favorite-id"});
+        }).toThrow(
+          'Inconsistent type for ID "my-favorite-id": ' +
+            'expected "Issue", got "User"'
+        );
+      });
+      it("rejects an unknown type", () => {
+        const db = new Database(":memory:");
+        const schema = buildGithubSchema();
+        const mirror = new Mirror(db, schema);
+        expect(() =>
+          mirror.registerObject({
+            typename: "Wat",
+            id: "repo:sourcecred/example-github",
+          })
+        ).toThrow('Unknown type: "Wat"');
+        expect(db.prepare("SELECT * FROM objects").all()).toHaveLength(0);
+        expect(db.prepare("SELECT * FROM connections").all()).toHaveLength(0);
+      });
+      it("rejects a union type", () => {
+        const db = new Database(":memory:");
+        const schema = buildGithubSchema();
+        const mirror = new Mirror(db, schema);
+        expect(() =>
+          mirror.registerObject({
+            typename: "Actor",
+            id: "user:credbot",
+          })
+        ).toThrow(
+          'Cannot add object of union type "Actor"; ' +
+            "must specify the clause of the union"
+        );
+        expect(db.prepare("SELECT * FROM objects").all()).toHaveLength(0);
+        expect(db.prepare("SELECT * FROM connections").all()).toHaveLength(0);
+      });
+    });
   });
 
   describe("_inTransaction", () => {
