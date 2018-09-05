@@ -208,6 +208,104 @@ export class Mirror {
       .prepare("INSERT INTO updates (time_epoch_millis) VALUES (?)")
       .run(+updateTimestamp).lastInsertROWID;
   }
+
+  /**
+   * Inform the GraphQL mirror of the existence of an object. The
+   * object's name and concrete type must be specified. The concrete
+   * type must be an OBJECT type in the GraphQL schema.
+   *
+   * If the object has previously been registered with the same type, no
+   * action is taken and no error is raised. If the object has
+   * previously been registered with a different type, an error is
+   * thrown, and the database is left unchanged.
+   */
+  registerObject(object: {|+typename: Schema.Typename, +id: Schema.ObjectId|}) {
+    _inTransaction(this._db, () => {
+      this._nontransactionallyRegisterObject(object);
+    });
+  }
+
+  /**
+   * As `registerObject`, but do not enter any transactions. Other
+   * methods may call this method as a subroutine in a larger
+   * transaction.
+   */
+  _nontransactionallyRegisterObject(object: {|
+    +typename: Schema.Typename,
+    +id: Schema.ObjectId,
+  |}) {
+    const db = this._db;
+    const {typename, id} = object;
+
+    const existingTypename = db
+      .prepare("SELECT typename FROM objects WHERE id = ?")
+      .pluck()
+      .get(id);
+    if (existingTypename === typename) {
+      // Already registered; nothing to do.
+      return;
+    } else if (existingTypename != null) {
+      const stringify = JSON.stringify;
+      throw new Error(
+        `Inconsistent type for ID ${stringify(id)}: ` +
+          `expected ${stringify(existingTypename)}, got ${stringify(typename)}`
+      );
+    }
+
+    const nodeType = this._schema[typename];
+    if (nodeType == null) {
+      throw new Error("Unknown type: " + JSON.stringify(typename));
+    }
+    switch (nodeType.type) {
+      case "UNION":
+        throw new Error(
+          "Cannot add object of union type " +
+            JSON.stringify(typename) +
+            "; must specify the clause of the union"
+        );
+      case "OBJECT": {
+        this._db
+          .prepare(
+            dedent`\
+              INSERT INTO objects (id, last_update, typename)
+              VALUES (:id, NULL, :typename)
+            `
+          )
+          .run({id, typename});
+        const addConnection = this._db.prepare(
+          // These fields are initialized to NULL because there has
+          // been no update and so they have no meaningful values:
+          // last_update, total_count, has_next_page, end_cursor.
+          dedent`\
+            INSERT INTO connections (object_id, fieldname)
+            VALUES (:id, :fieldname)
+          `
+        );
+        for (const fieldname of Object.keys(nodeType.fields)) {
+          const field = nodeType.fields[fieldname];
+          switch (field.type) {
+            case "ID":
+              break;
+            case "PRIMITIVE":
+              break;
+            case "NODE":
+              break;
+            case "CONNECTION": {
+              addConnection.run({id, fieldname});
+              break;
+            }
+            // istanbul ignore next
+            default:
+              throw new Error((field.type: empty));
+          }
+        }
+        break;
+      }
+      // istanbul ignore next
+      default:
+        throw new Error((nodeType.type: empty));
+    }
+  }
 }
 
 export opaque type UpdateId = number;
