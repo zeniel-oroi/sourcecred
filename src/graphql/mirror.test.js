@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import tmp from "tmp";
 
+import dedent from "../util/dedent";
 import * as Schema from "./schema";
 import {_inTransaction, Mirror} from "./mirror";
 
@@ -274,6 +275,134 @@ describe("graphql/mirror", () => {
         );
         expect(db.prepare("SELECT * FROM objects").all()).toHaveLength(0);
         expect(db.prepare("SELECT * FROM connections").all()).toHaveLength(0);
+      });
+    });
+
+    describe("findOutdated", () => {
+      it("finds the right objects and connections", () => {
+        const db = new Database(":memory:");
+        const schema = buildGithubSchema();
+        const mirror = new Mirror(db, schema);
+        mirror.registerObject({typename: "Repository", id: "repo:ab/cd"});
+        mirror.registerObject({typename: "Issue", id: "issue:ab/cd#1"});
+        mirror.registerObject({typename: "Issue", id: "issue:ab/cd#2"});
+        mirror.registerObject({typename: "Issue", id: "issue:ab/cd#3"});
+        mirror.registerObject({typename: "Issue", id: "issue:ab/cd#4"});
+
+        const createUpdate = (epochTimeMillis) => ({
+          time: epochTimeMillis,
+          id: mirror._createUpdate(new Date(epochTimeMillis)),
+        });
+        const earlyUpdate = createUpdate(123);
+        const midUpdate = createUpdate(456);
+        const lateUpdate = createUpdate(789);
+
+        const makeUpdateFunction = (updateSql) => {
+          const stmt = db.prepare(updateSql);
+          return (...bindings) => {
+            const result = stmt.run(...bindings);
+            // Make sure we actually updated something. (This can
+            // trigger if, for instance, you copy-paste some updates for
+            // a new object, but never actually register that object
+            // with the DB.)
+            expect({updateSql, bindings, result}).toEqual({
+              updateSql,
+              bindings,
+              result: expect.objectContaining({changes: 1}),
+            });
+          };
+        };
+
+        const setObjectData = makeUpdateFunction(
+          "UPDATE objects SET last_update = :update WHERE id = :id"
+        );
+        setObjectData({id: "repo:ab/cd", update: earlyUpdate.id});
+        setObjectData({id: "issue:ab/cd#1", update: lateUpdate.id});
+        setObjectData({id: "issue:ab/cd#2", update: null});
+        setObjectData({id: "issue:ab/cd#3", update: null});
+        setObjectData({id: "issue:ab/cd#4", update: midUpdate.id});
+
+        const setConnectionData = makeUpdateFunction(
+          dedent`\
+            UPDATE connections SET
+              last_update = :update,
+              has_next_page = :hasNextPage,
+              end_cursor = :endCursor
+            WHERE object_id = :objectId AND fieldname = :fieldname
+          `
+        );
+        setConnectionData({
+          objectId: "repo:ab/cd",
+          fieldname: "issues",
+          update: earlyUpdate.id,
+          hasNextPage: +false,
+          endCursor: "cursor:repo.issues",
+        });
+        setConnectionData({
+          objectId: "issue:ab/cd#1",
+          fieldname: "comments",
+          update: null,
+          hasNextPage: +false,
+          endCursor: "cursor:issue1.comments",
+        });
+        setConnectionData({
+          objectId: "issue:ab/cd#2",
+          fieldname: "comments",
+          update: lateUpdate.id,
+          hasNextPage: +true,
+          endCursor: null,
+        });
+        setConnectionData({
+          objectId: "issue:ab/cd#3",
+          fieldname: "comments",
+          update: lateUpdate.id,
+          hasNextPage: +false,
+          endCursor: null,
+        });
+        setConnectionData({
+          objectId: "issue:ab/cd#4",
+          fieldname: "comments",
+          update: midUpdate.id,
+          hasNextPage: +false,
+          endCursor: "cursor:issue4.comments",
+        });
+
+        const actual = mirror.findOutdated(new Date(midUpdate.time));
+        const expected = {
+          objects: [
+            {typename: "Repository", id: "repo:ab/cd"}, // loaded before cutoff
+            // issue:ab/cd#1 was loaded after the cutoff
+            {typename: "Issue", id: "issue:ab/cd#2"}, // never loaded
+            {typename: "Issue", id: "issue:ab/cd#3"}, // never loaded
+            // issue:ab/cd#4 was loaded exactly at the cutoff
+          ],
+          connections: [
+            {
+              // loaded before cutoff
+              typename: "Repository",
+              id: "repo:ab/cd",
+              fieldname: "issues",
+              endCursor: "cursor:repo.issues",
+            },
+            {
+              // never loaded
+              typename: "Issue",
+              id: "issue:ab/cd#1",
+              fieldname: "comments",
+              endCursor: "cursor:issue1.comments",
+            },
+            {
+              // loaded, but has more data available
+              typename: "Issue",
+              id: "issue:ab/cd#2",
+              fieldname: "comments",
+              endCursor: null,
+            },
+            // issue:ab/cd#3.comments was loaded after the cutoff
+            // issue:ab/cd#4.comments was loaded exactly at the cutoff
+          ],
+        };
+        expect(actual).toEqual(expected);
       });
     });
   });

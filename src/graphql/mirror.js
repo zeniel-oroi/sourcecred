@@ -306,9 +306,76 @@ export class Mirror {
         throw new Error((nodeType.type: empty));
     }
   }
+
+  /**
+   * Find objects and connections that have are not known to be
+   * up-to-date as of the provided date.
+   *
+   * An object is up-to-date if its own data has been loaded at least as
+   * recently as the provided date.
+   *
+   * A connection is up-to-date if it has been fetched at least as
+   * recently as the provided date, and at the time of fetching there
+   * were no more pages.
+   */
+  findOutdated(
+    since: Date
+  ): {|
+    +objects: $ReadOnlyArray<{|
+      +typename: Schema.Typename,
+      +id: Schema.ObjectId,
+    |}>,
+    +connections: $ReadOnlyArray<{|
+      +typename: Schema.Typename,
+      +id: Schema.ObjectId,
+      +fieldname: Schema.Fieldname,
+      +endCursor: EndCursor,
+    |}>,
+  |} {
+    const db = this._db;
+    return _inTransaction(db, () => {
+      const objects = db
+        .prepare(
+          dedent`\
+            SELECT typename, id
+            FROM objects
+            LEFT OUTER JOIN updates ON objects.last_update = updates.rowid
+            WHERE objects.last_update IS NULL
+            OR updates.time_epoch_millis < :timeEpochMillisThreshold
+          `
+        )
+        .all({timeEpochMillisThreshold: +since});
+      const connections = db
+        .prepare(
+          dedent`
+            SELECT
+              objects.typename,
+              objects.id,
+              connections.fieldname,
+              connections.end_cursor AS endCursor
+            FROM objects
+            JOIN connections ON objects.id = connections.object_id
+            LEFT OUTER JOIN updates ON objects.last_update = updates.rowid
+            WHERE connections.has_next_page
+            OR connections.last_update IS NULL
+            OR updates.time_epoch_millis < :timeEpochMillisThreshold
+          `
+        )
+        .all({timeEpochMillisThreshold: +since});
+      return {objects, connections};
+    });
+  }
 }
 
 export opaque type UpdateId = number;
+
+/**
+ * An `endCursor` of a GraphQL `pageInfo` object, denoting where the
+ * cursor should continue reading the next page. This is `null` when the
+ * cursor is at the beginning of the connection (i.e., when the
+ * connection is empty, or when `first: 0` is provided).
+ */
+type EndCursor = string | null;
 
 /**
  * Execute a function inside a database transaction.
