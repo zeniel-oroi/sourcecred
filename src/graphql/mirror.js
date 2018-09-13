@@ -198,7 +198,19 @@ export class Mirror {
       }
     });
   }
+
+  /**
+   * Register a new update, representing one communication with the
+   * remote server. A unique ID will be created and returned.
+   */
+  _createUpdate(updateTimestamp: Date): UpdateId {
+    return this._db
+      .prepare("INSERT INTO updates (time_epoch_millis) VALUES (?)")
+      .run(+updateTimestamp).lastInsertROWID;
+  }
 }
+
+export opaque type UpdateId = number;
 
 /**
  * Execute a function inside a database transaction.
