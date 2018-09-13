@@ -5,9 +5,17 @@ import stringify from "json-stable-stringify";
 
 import dedent from "../util/dedent";
 import * as Schema from "./schema";
+import * as Queries from "./queries";
 
 /**
  * A local mirror of a subset of a GraphQL database.
+ */
+/*
+ * NOTE(perf): The implementation of this class is not particularly
+ * optimized. In particular, when we interact with SQLite, we compile
+ * our prepared statements many times over the lifespan of an
+ * instance. It may be beneficial to precompile them at instance
+ * construction time.
  */
 export class Mirror {
   +_db: Database;
@@ -308,6 +316,209 @@ export class Mirror {
   }
 
   /**
+   * Create a GraphQL selection set required to identify the typename
+   * and ID for an object. This is the minimal information required to
+   * register an object in our database, so we query this information
+   * whenever we find a reference to an object that we want to traverse
+   * later.
+   *
+   * The resulting GraphQL should be embedded in any node context. For
+   * instance, it might replace the `?` in any of the following queries:
+   *
+   *     repository(owner: "foo", name: "bar") { ? }
+   *
+   *     repository(owner: "foo", name: "bar") {
+   *       issues(first: 1) {
+   *         nodes { ? }
+   *       }
+   *     }
+   *
+   *     nodes(ids: ["baz", "quux"]) { ? }
+   *
+   * The result of this query has type `NodeFieldResult`.
+   */
+  _queryShallow(): Queries.Selection[] {
+    const b = Queries.build;
+    return [b.field("__typename"), b.field("id")];
+  }
+
+  /**
+   * Create a GraphQL selection set to fetch new elements from a given
+   * collection on a given object (for instance, fetch new comments on a
+   * particular issue).
+   *
+   * The resuting GraphQL should be embedded in the context of the node
+   * with the given ID. For instance, if issue "foo/bar#1" has ID "baz",
+   * then the result of `queryExistingConnection("Issue", "foo/bar#1")`
+   * might replace the `?` in the following query:
+   *
+   *     node(id: "baz") { ? }
+   *
+   * The result of this query has type `ConnectionFieldResult`.
+   *
+   * See also: `queryNewConnection`.
+   */
+  _queryExistingConnection(
+    objectId: string,
+    fieldname: Schema.Fieldname,
+    connectionPageSize: number = 100
+  ): Queries.Selection[] {
+    const db = this._db;
+    const existingEndCursor: string | null = db
+      .prepare(
+        dedent`
+          SELECT end_cursor FROM connections
+          WHERE object_id = :objectId AND fieldname = :fieldname
+        `
+      )
+      .pluck(true)
+      // No need to worry about corruption in the form of multiple
+      // matches: there is a UNIQUE(object_id, fieldname) constraint.
+      .get({objectId, fieldname});
+    if (existingEndCursor === undefined) {
+      throw new Error(`No such connection: ${objectId}.${fieldname}`);
+    }
+    const b = Queries.build;
+    return [
+      b.field(
+        fieldname,
+        {
+          first: b.literal(connectionPageSize),
+          after: b.literal(existingEndCursor),
+        },
+        [
+          b.field("totalCount"),
+          b.field("pageInfo", {}, [
+            b.field("endCursor"),
+            b.field("hasNextPage"),
+          ]),
+          b.field("nodes", {}, this._queryShallow()),
+        ]
+      ),
+    ];
+  }
+
+  /**
+   * Create a GraphQL selection set to fetch initial elements from a
+   * given collection whose connection we haven't queried before. This
+   * is like `queryExistingConnection`, except that it queries from the
+   * beginning instead of starting from a known `endCursor`.
+   *
+   * The resuting GraphQL should be embedded in the context of any node
+   * with a connection of the appropriate fieldname. For instance, if
+   * repository "foo/bar" has ID "baz", then the result of
+   * `queryNewConnection("issues")` might replace the `?` in either of
+   * the following queries:
+   *
+   *     repository(owner: "foo", name: "bar") { ? }
+   *
+   *     node(id: "baz") { ? }
+   *
+   * The result of this query has type `ConnectionFieldResult`.
+   *
+   * See also: `queryExistingConnection`.
+   */
+  _queryNewConnection(
+    fieldname: Schema.Fieldname,
+    connectionPageSize: number = 100
+  ): Queries.Selection[] {
+    const b = Queries.build;
+    return [
+      b.field(fieldname, {first: b.literal(connectionPageSize)}, [
+        b.field("totalCount"),
+        b.field("pageInfo", {}, [b.field("endCursor"), b.field("hasNextPage")]),
+        b.field("nodes", {}, this._queryShallow()),
+      ]),
+    ];
+  }
+
+  /**
+   * Ingest new entries in a connection on an existing object.
+   *
+   * See: `_queryNewConnection`.
+   * See: `_queryExistingConnection`.
+   * See: `_createUpdate`.
+   */
+  _updateConnection(
+    updateId: UpdateId,
+    objectId: Schema.ObjectId,
+    fieldname: Schema.Fieldname,
+    result: ConnectionFieldResult
+  ): void {
+    _inTransaction(this._db, () => {
+      this._nontransactionallyUpdateConnection(
+        updateId,
+        objectId,
+        fieldname,
+        result
+      );
+    });
+  }
+
+  _nontransactionallyUpdateConnection(
+    updateId: UpdateId,
+    objectId: Schema.ObjectId,
+    fieldname: Schema.Fieldname,
+    result: ConnectionFieldResult
+  ): void {
+    const db = this._db;
+    const connectionId: number = this._db
+      .prepare(
+        dedent`\
+          SELECT rowid FROM connections
+          WHERE object_id = :objectId AND fieldname = :fieldname
+        `
+      )
+      .pluck()
+      .get({objectId, fieldname});
+    // There is a UNIQUE(object_id, fieldname) constraint, so we don't
+    // have to worry about pollution due to duplicates. But it's
+    // possible that no such connection exists, indicating that the
+    // object has not been registered. This is an error.
+    if (connectionId === undefined) {
+      throw new Error(`No such connection: ${objectId}.${fieldname}`);
+    }
+    db.prepare(
+      dedent`
+          UPDATE connections
+          SET
+            last_update = :updateId,
+            total_count = :totalCount,
+            has_next_page = :hasNextPage,
+            end_cursor = :endCursor
+          WHERE rowid = :connectionId
+        `
+    ).run({
+      connectionId,
+      updateId,
+      totalCount: result.totalCount,
+      hasNextPage: result.pageInfo.hasNextPage,
+      endCursor: result.pageInfo.endCursor,
+    });
+    let nextIndex: number = db
+      .prepare(
+        dedent`\
+            SELECT IFNULL(MAX(idx) + 1, 0) FROM connection_entries
+            WHERE connection_id = :connectionId
+          `
+      )
+      .pluck()
+      .get();
+    const addEntry = db.prepare(
+      dedent`\
+          INSERT INTO connection_entries
+          (connection_id, idx, child_id)
+          VALUES (:connectionId, :idx, :childId)
+        `
+    );
+    for (const node of result.nodes) {
+      const childObject = {typename: node.__typename, id: node.id};
+      this._nontransactionallyRegisterObject(childObject);
+      addEntry.run({connectionId, idx: nextIndex++, childId: childObject.id});
+    }
+  }
+
+  /**
    * Find objects and connections that have are not known to be
    * up-to-date as of the provided date.
    *
@@ -376,6 +587,16 @@ export opaque type UpdateId = number;
  * connection is empty, or when `first: 0` is provided).
  */
 type EndCursor = string | null;
+
+export type NodeFieldResult = {|
+  +__typename: Schema.Typename,
+  +id: Schema.ObjectId,
+|};
+export type ConnectionFieldResult = {|
+  +totalCount: number,
+  +pageInfo: {|+hasNextPage: boolean, +endCursor: string | null|},
+  +nodes: $ReadOnlyArray<NodeFieldResult>,
+|};
 
 /**
  * Execute a function inside a database transaction.
