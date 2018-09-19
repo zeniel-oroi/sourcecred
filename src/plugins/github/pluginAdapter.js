@@ -1,16 +1,19 @@
 // @flow
+
 import pako from "pako";
+import React, {type Node as ReactNode} from "react";
 
 import type {
   StaticPluginAdapter as IStaticPluginAdapter,
   DynamicPluginAdapter as IDynamicPluginAdapater,
+  NodeDescription,
 } from "../../app/adapters/pluginAdapter";
 import {type Graph, NodeAddress} from "../../core/graph";
 import {createGraph} from "./createGraph";
 import * as N from "./nodes";
 import * as E from "./edges";
 import {RelationalView} from "./relationalView";
-import {description} from "./render";
+import {getNodeDescription} from "./render";
 import type {Assets} from "../../app/assets";
 import type {Repo} from "../../core/repo";
 
@@ -154,19 +157,14 @@ export class StaticPluginAdapter implements IStaticPluginAdapter {
 class DynamicPluginAdapter implements IDynamicPluginAdapater {
   +_view: RelationalView;
   +_graph: Graph;
+  +_nodeDescription: NodeDescription;
   constructor(view: RelationalView, graph: Graph) {
     this._view = view;
     this._graph = graph;
+    this._nodeDescription = getNodeDescription(this._view);
   }
-  nodeDescription(node) {
-    // This cast is unsound, and might throw at runtime, but won't have
-    // silent failures or cause problems down the road.
-    const address = N.fromRaw((node: any));
-    const entity = this._view.entity(address);
-    if (entity == null) {
-      throw new Error(`unknown entity: ${NodeAddress.toString(node)}`);
-    }
-    return description(entity);
+  nodeDescription(): NodeDescription {
+    return this._nodeDescription;
   }
   graph() {
     return this._graph;

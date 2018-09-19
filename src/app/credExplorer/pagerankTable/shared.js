@@ -8,21 +8,16 @@ import {
 } from "../../../core/graph";
 
 import {DynamicAdapterSet} from "../../adapters/adapterSet";
+import type {NodeDescription} from "../../adapters/pluginAdapter";
 
 import type {PagerankNodeDecomposition} from "../../../core/attribution/pagerankNodeDecomposition";
 
 export function nodeDescription(
   address: NodeAddressT,
   adapters: DynamicAdapterSet
-): string {
+): NodeDescription {
   const adapter = adapters.adapterMatchingNode(address);
-  try {
-    return adapter.nodeDescription(address);
-  } catch (e) {
-    const result = NodeAddress.toString(address);
-    console.error(`Error getting description for ${result}: ${e.message}`);
-    return result;
-  }
+  return adapter.nodeDescription();
 }
 
 export function edgeVerb(

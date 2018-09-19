@@ -1,5 +1,7 @@
 // @flow
 
+import React, {type Node as ReactNode} from "react";
+
 import {Assets} from "../assets";
 import {
   Graph,
@@ -12,6 +14,7 @@ import type {
   DynamicPluginAdapter,
   EdgeType,
   NodeType,
+  NodeDescription,
 } from "./pluginAdapter";
 
 import {StaticAdapterSet} from "./adapterSet";
@@ -70,7 +73,9 @@ export class FactorioStaticAdapter implements StaticPluginAdapter {
         () => new FactorioDynamicAdapter()
       );
     }
-    return Promise.resolve(new FactorioDynamicAdapter());
+    return Promise.resolve(
+      (new FactorioDynamicAdapter(): DynamicPluginAdapter)
+    );
   }
 }
 
@@ -109,12 +114,20 @@ export function factorioGraph() {
     .addEdge(factorioEdges.assembles1);
 }
 
+export class FactorioNodeDescription extends React.Component<{|
+  +address: NodeAddressT,
+|}> {
+  render() {
+    return NodeAddress.toString(this.props.address);
+  }
+}
+
 export class FactorioDynamicAdapter implements DynamicPluginAdapter {
   graph() {
     return factorioGraph();
   }
-  nodeDescription(x: NodeAddressT) {
-    return NodeAddress.toString(x);
+  nodeDescription(): NodeDescription {
+    return FactorioNodeDescription;
   }
   static() {
     return new FactorioStaticAdapter();

@@ -1,5 +1,7 @@
 // @flow
 
+import React, {type Node as ReactNode} from "react";
+
 import {
   Graph,
   NodeAddress,
@@ -50,7 +52,17 @@ export class FallbackStaticAdapter implements StaticPluginAdapter {
   }
 
   load(_unused_assets: Assets, _unused_repo: Repo) {
-    return Promise.resolve(new FallbackDynamicAdapter());
+    return Promise.resolve(
+      (new FallbackDynamicAdapter(): DynamicPluginAdapter)
+    );
+  }
+}
+
+export class FallbackNodeDescription extends React.Component<{|
+  +address: NodeAddressT,
+|}> {
+  render() {
+    return NodeAddress.toString(this.props.address);
   }
 }
 
@@ -59,8 +71,8 @@ export class FallbackDynamicAdapter implements DynamicPluginAdapter {
     return new Graph();
   }
 
-  nodeDescription(x: NodeAddressT) {
-    return NodeAddress.toString(x);
+  nodeDescription() {
+    return FallbackNodeDescription;
   }
 
   static() {

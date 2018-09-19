@@ -1,9 +1,12 @@
 // @flow
+
+import React, {type Node as ReactNode} from "react";
+
 import type {
   StaticPluginAdapter as IStaticPluginAdapter,
   DynamicPluginAdapter as IDynamicPluginAdapter,
 } from "../../app/adapters/pluginAdapter";
-import {Graph} from "../../core/graph";
+import {Graph, type NodeAddressT} from "../../core/graph";
 import * as N from "./nodes";
 import * as E from "./edges";
 import {description} from "./render";
@@ -101,6 +104,13 @@ export class StaticPluginAdapter implements IStaticPluginAdapter {
   }
 }
 
+class GitDescription extends React.Component<{|+address: NodeAddressT|}> {
+  render() {
+    const address = N.fromRaw((this.props.address: any));
+    return description(address);
+  }
+}
+
 class DynamicPluginAdapter implements IDynamicPluginAdapter {
   +_graph: Graph;
   constructor(graph: Graph) {
@@ -109,11 +119,8 @@ class DynamicPluginAdapter implements IDynamicPluginAdapter {
   graph() {
     return this._graph;
   }
-  nodeDescription(node) {
-    // This cast is unsound, and might throw at runtime, but won't have
-    // silent failures or cause problems down the road.
-    const address = N.fromRaw((node: any));
-    return description(address);
+  nodeDescription() {
+    return GitDescription;
   }
   static() {
     return new StaticPluginAdapter();
